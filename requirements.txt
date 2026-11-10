@@ -1,0 +1,8 @@
+clams-python==1.9.0
+# PyAV for mmif.utils.audio_document_helper; the version clams-python pins
+mmif-python[av]==1.8.1
+huggingface_hub>=0.20
+# dependencies of the FireRedLID code; FireRedASR2S pins kaldiio 2.18.0,
+# which needs pkg_resources, gone from current setuptools
+kaldiio==2.18.1
+kaldi_native_fbank==1.15
