@@ -74,7 +74,8 @@ class _Dict:
 @pytest.fixture
 def lid(monkeypatch):
     fake = FakeLid()
-    monkeypatch.setattr(app, 'load_lid', lambda: fake)
+    monkeypatch.setattr(app._FireRedLid, 'load',
+                        classmethod(lambda cls: cls(fake)))
     return fake
 
 
@@ -101,7 +102,8 @@ def run(audio_path, **params):
         '@type': DocumentTypes.AudioDocument,
         'properties': {'id': 'd1', 'mime': 'audio/wav',
                        'location': f'file://{audio_path}'}}))
-    params = {k: [str(v)] for k, v in params.items()}
+    params = {k: [str(x) for x in v] if isinstance(v, list) else [str(v)]
+              for k, v in params.items()}
     return Mmif(app.get_app().annotate(mmif, **params))
 
 
@@ -115,12 +117,12 @@ def timeframes(out):
 
 def test_segments():
     windows = [(0, 10, 'en', .9), (10, 20, 'en', .8), (20, 25, 'fr', .7)]
-    assert list(app.segments(windows)) == [
+    assert list(app._segments(windows)) == [
         (0, 20, 'en', [.9, .8]), (20, 25, 'fr', [.7])]
-    assert list(app.segments(windows, merge=False)) == [
+    assert list(app._segments(windows, merge=False)) == [
         (0, 10, 'en', [.9]), (10, 20, 'en', [.8]), (20, 25, 'fr', [.7])]
     # windows that do not touch stay apart
-    assert list(app.segments([(0, 10, 'en', .9), (15, 20, 'en', .8)])) == [
+    assert list(app._segments([(0, 10, 'en', .9), (15, 20, 'en', .8)])) == [
         (0, 10, 'en', [.9]), (15, 20, 'en', [.8])]
 
 
@@ -138,7 +140,8 @@ def test_same_language_windows_are_merged(lid, audio_path):
 
 
 def test_legacy_codes_become_bcp47_tags(monkeypatch, audio_path):
-    monkeypatch.setattr(app, 'load_lid', lambda: FakeLid(['iw', 'jw']))
+    monkeypatch.setattr(app._FireRedLid, 'load',
+                        classmethod(lambda cls: cls(FakeLid(['iw', 'jw']))))
     _, tfs = timeframes(run(audio_path, windowMs=1000, tfMerge=False))
     assert [label for _, _, label, _ in tfs] == ['he', 'jv', 'he', 'jv']
 
@@ -172,3 +175,74 @@ def test_batches_follow_batch_size(lid, audio_path):
     _, tfs = timeframes(run(audio_path, windowMs=1000, batchSize=3))
     assert lid.batch_sizes == [3, 1]
     assert len(tfs) == 3
+
+
+# probabilities over the label tokens of VOCAB (en, es, fr, zh, other, iw,
+# jw) for each 1000 ms window
+PROBS = [[.6, .1, .1, .1, .1, 0, 0],
+         [.3, .3, .4, 0, 0, 0, 0]]
+
+
+@pytest.fixture
+def first_step(monkeypatch):
+    tokens = [i for i, w in enumerate(VOCAB)
+              if w not in app._FireRedLid._SPECIAL_TOKENS
+              | app._FireRedLid._DIALECT_TOKENS]
+
+    def fake(model, feats, lengths):
+        logits = torch.full((len(feats), len(VOCAB)), -1e9)
+        for row in range(len(feats)):
+            p = torch.tensor(PROBS[(fake.seen + row) % len(PROBS)])
+            # softmax(logit / T) gives back p
+            logits[row, tokens] = torch.log(p.clamp_min(1e-12)) * 1.25
+        fake.seen += len(feats)
+        return logits
+
+    fake.seen = 0
+    monkeypatch.setattr(app._FireRedLid, '_first_step_logits', fake)
+
+
+def test_parse_label_map():
+    labelset = ['en', 'es', 'fr']
+    assert app._parse_label_map(['en', 'es:spanish'], labelset) == {
+        'en': 'en', 'es': 'spanish'}
+    with pytest.raises(ValueError, match='"xx" is not a label'):
+        app._parse_label_map(['xx:en'], labelset)
+
+
+def test_label_map_pools_probabilities(lid, first_step, audio_path):
+    view, tfs = timeframes(run(audio_path, windowMs=1000, tfMerge=False,
+                               labelMap='en'))
+    # window 2: en 0.3 against 0.7 for all other labels
+    assert [(label, round(scores[0], 3)) for _, _, label, scores in tfs] == [
+        ('en', 0.6), ('-', 0.7), ('en', 0.6), ('-', 0.7)]
+    contain = view.metadata.contains[AnnotationTypes.TimeFrame]
+    assert contain['labelset'] == ['en', '-']
+
+
+def test_labels_mapped_together_add_up(lid, first_step, audio_path):
+    mmif = run(audio_path, windowMs=1000, tfMerge=False,
+                     labelMap=['en:target', 'es:target'])
+    _, tfs = timeframes(mmif)
+    assert [(label, round(scores[0], 3)) for _, _, label, scores in tfs] == [
+        ('target', 0.7), ('target', 0.6), ('target', 0.7), ('target', 0.6)]
+
+
+
+def test_min_label_score_sets_the_bar(lid, first_step, audio_path):
+    # window 2: en 0.3, below the default 0.5 but above 0.25
+    _, tfs = timeframes(run(audio_path, windowMs=1000, tfMerge=False,
+                            labelMap='en', minLabelScore=0.25))
+    assert [(label, round(scores[0], 3)) for _, _, label, scores in tfs] == [
+        ('en', 0.6), ('en', 0.3), ('en', 0.6), ('en', 0.3)]
+    _, tfs = timeframes(run(audio_path, windowMs=1000, tfMerge=False,
+                            labelMap='en', minLabelScore=0.7))
+    assert [label for _, _, label, _ in tfs] == ['-'] * 4
+
+
+def test_separate_labels_each_need_the_score(lid, first_step, audio_path):
+    # window 2: en 0.3 and es 0.3, each below 0.5
+    _, tfs = timeframes(run(audio_path, windowMs=1000, tfMerge=False,
+                            labelMap=['en', 'es']))
+    assert [(label, round(scores[0], 3)) for _, _, label, scores in tfs] == [
+        ('en', 0.6), ('-', 0.4), ('en', 0.6), ('-', 0.4)]

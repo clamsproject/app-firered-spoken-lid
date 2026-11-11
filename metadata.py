@@ -38,12 +38,13 @@ def appmetadata() -> AppMetadata:
     out_tf.add_description(
         'Each TimeFrame covers consecutive windows that FireRedLID labels '
         'with the language `label`, or `other`. Language labels are '
-        'canonicalized to BCP 47 tags; see README.md in the app repository '
-        'for details. `labelset` lists all labels of the model. `scores` lists, in time '
-        'order, the FireRedLID confidence of `label` in each of those '
+        'canonicalized to BCP 47 tags, and `labelMap` can reduce them; see '
+        'README.md in the app repository for details. `labelset` lists all '
+        'labels the view can have. `scores` lists, in time order, the '
+        'FireRedLID score of `label` in each of those '
         'windows, one float in [0, 1] per window. Window i starts at '
         '`start` + i * `windowMs`; the last window ends at `end` and can be '
-        'shorter. The confidences are not calibrated.')
+        'shorter. The scores are not calibrated.')
 
     metadata.add_parameter(
         name='windowMs', type='integer', default=10000,
@@ -57,6 +58,17 @@ def appmetadata() -> AppMetadata:
         description='Join consecutive windows with the same label into one '
                     'TimeFrame. When false, each window becomes its own '
                     'TimeFrame, with one score.')
+    metadata.add_parameter(
+        name='labelMap', type='string', default=[], multivalued=True,
+        description='Labels to keep, as "IN:OUT" (rename IN to OUT) or "IN" '
+                    '(keep IN as it is). Other labels become "-". Empty '
+                    'keeps every label of the model. See README.md in the '
+                    'app repository for how the label is chosen.')
+    metadata.add_parameter(
+        name='minLabelScore', type='number', default=0.5,
+        description='Minimum score for a label from labelMap to be kept; a '
+                    'window whose best mapped label scores less becomes '
+                    '"-". Only applies with labelMap.')
     metadata.add_parameter(
         name='batchSize', type='integer', default=1,
         description='Number of windows passed to the model at once.')
